@@ -8,8 +8,10 @@ use ApiPlatform\Core\Bridge\Symfony\Bundle\Test\ApiTestCase;
 use ApiPlatform\Core\Bridge\Symfony\Bundle\Test\Client;
 use ApiPlatform\Core\Bridge\Symfony\Routing\Router;
 use App\Entity\Book;
+use Doctrine\ORM\EntityManagerInterface;
+use Ramsey\Uuid\Uuid;
 use Symfony\Component\HttpFoundation\Response;
-use Symfony\Contracts\Service\ServiceProviderInterface;
+use Symfony\Contracts\HttpClient\ResponseInterface;
 
 class BooksTest extends ApiTestCase
 {
@@ -17,12 +19,6 @@ class BooksTest extends ApiTestCase
 
     private Client $client;
     private Router $router;
-
-    public const ISBN = '9786644879585';
-    public const ITEMS_PER_PAGE = 30;
-    public const COUNT_WITHOUT_ARCHIVED = 100;
-    public const COUNT_ARCHIVED = 1;
-    public const COUNT = self::COUNT_WITHOUT_ARCHIVED + self::COUNT_ARCHIVED;
 
     protected function setup(): void
     {
@@ -34,186 +30,130 @@ class BooksTest extends ApiTestCase
         $this->router = $router;
     }
 
-    public function testGetCollection(): void
+    public function testItSeesABook(): void
     {
-        // The client implements Symfony HttpClient's `HttpClientInterface`, and the response `ResponseInterface`
-        $response = $this->client->request('GET', '/books');
-        self::assertResponseIsSuccessful();
-        self::assertResponseHeaderSame('content-type', 'application/ld+json; charset=utf-8');
-        self::assertJsonContains([
-            '@context' => '/contexts/Book',
-            '@id' => '/books',
-            '@type' => 'hydra:Collection',
-            'hydra:totalItems' => self::COUNT,
-            'hydra:view' => [
-                '@id' => '/books?page=1',
-                '@type' => 'hydra:PartialCollectionView',
-                'hydra:first' => '/books?page=1',
-                'hydra:last' => '/books?page=4',
-                'hydra:next' => '/books?page=2',
+        $book = $this->getBook();
+        static::assertInstanceOf(Book::class, $book);
+
+        $expectedAttributes = $this->getExpectedAttributes($book);
+
+        $response = $this->doGet('/books/'.$book->getUuid());
+        static::assertResponseStatusCodeSame(Response::HTTP_OK);
+
+        $data = json_decode($response->getContent(), true, 512, JSON_THROW_ON_ERROR)['data'] ?? [];
+        static::assertEquals($expectedAttributes, $data);
+    }
+
+    public function testItCreatesABook(): void
+    {
+        $response = $this->doPost(
+            '/books',
+            [
+                'title' => 'Api-Platform is awesome',
+                'isbn' => '0983769001',
+                'author' => 'Santa Claus',
+                'description' => 'Great',
+                'publicationDate' => '2022-12-25',
+            ]
+        );
+        static::assertResponseStatusCodeSame(Response::HTTP_CREATED);
+
+        $data = json_decode($response->getContent(), true, 512, JSON_THROW_ON_ERROR)['data'] ?? [];
+        static::assertArrayHasKey('id', $data, 'The created resource has no resource identifier.');
+        static::assertSame('Book', $data['type'], 'The type of the created resource is not a Book.');
+
+        $attributes = $data['attributes'] ?? [];
+        static::assertTrue(Uuid::isValid($attributes['id']), 'The id of the generated resource is not an uuid.');
+
+        static::assertEquals('Api-Platform is awesome', $data['attributes']['title']);
+    }
+
+    private function doPost(string $path, array $json = []): ResponseInterface
+    {
+        return $this->doRequest('POST', $path, $json);
+    }
+
+    private function doGet(string $path): ResponseInterface
+    {
+        return $this->doRequest('GET', $path);
+    }
+
+    private function doRequest(
+        string $method,
+        string $path,
+        ?array $json = null,
+    ): ResponseInterface {
+        $options = [
+            'json' => $json,
+            'headers' => [
+                'Content-Type: application/json',
+                'Accept: application/vnd.api+json',
             ],
-        ]);
-
-        // It works because the API returns test fixtures loaded by Alice
-        self::assertCount(self::ITEMS_PER_PAGE, $response->toArray()['hydra:member']);
-
-        static::assertMatchesJsonSchema(file_get_contents(__DIR__.'/schemas/books.json'));
-        // Checks that the returned JSON is validated by the JSON Schema generated for this API Resource by API Platform
-        // This JSON Schema is also used in the generated OpenAPI spec
-        self::assertMatchesResourceCollectionJsonSchema(Book::class);
-    }
-
-    public function testCreateBook(): void
-    {
-        $response = $this->client->request('POST', '/books', ['json' => [
-            'isbn' => '0099740915',
-            'title' => 'The Handmaid\'s Tale',
-            'description' => 'Brilliantly conceived and executed, this powerful evocation of twenty-first century America gives full rein to Margaret Atwood\'s devastating irony, wit and astute perception.',
-            'author' => 'Margaret Atwood',
-            'publicationDate' => '1985-07-31T00:00:00+00:00',
-        ]]);
-
-        self::assertResponseStatusCodeSame(Response::HTTP_CREATED);
-        self::assertResponseHeaderSame('content-type', 'application/ld+json; charset=utf-8');
-        self::assertJsonContains([
-            '@context' => '/contexts/Book',
-            '@type' => 'https://schema.org/Book',
-            'isbn' => '0099740915',
-            'title' => 'The Handmaid\'s Tale',
-            'description' => 'Brilliantly conceived and executed, this powerful evocation of twenty-first century America gives full rein to Margaret Atwood\'s devastating irony, wit and astute perception.',
-            'author' => 'Margaret Atwood',
-            'publicationDate' => '1985-07-31T00:00:00+00:00',
-            'reviews' => [],
-        ]);
-        self::assertMatchesRegularExpression('~^/books/[0-9a-fA-F]{8}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{12}$~', $response->toArray()['@id']);
-        self::assertMatchesResourceItemJsonSchema(Book::class);
-    }
-
-    public function testCreateInvalidBook(): void
-    {
-        $this->client->request('POST', '/books', ['json' => [
-            'isbn' => 'invalid',
-        ]]);
-
-        self::assertResponseStatusCodeSame(Response::HTTP_UNPROCESSABLE_ENTITY);
-        self::assertResponseHeaderSame('content-type', 'application/ld+json; charset=utf-8');
-
-        self::assertJsonContains([
-            '@context' => '/contexts/ConstraintViolationList',
-            '@type' => 'ConstraintViolationList',
-            'hydra:title' => 'An error occurred',
-            'hydra:description' => 'isbn: This value is neither a valid ISBN-10 nor a valid ISBN-13.
-title: This value should not be blank.
-description: This value should not be blank.
-author: This value should not be blank.
-publicationDate: This value should not be null.',
-        ]);
-    }
-
-    public function testUpdateBook(): void
-    {
-        $iri = (string) $this->findIriBy(Book::class, ['isbn' => self::ISBN]);
-        $this->client->request('PUT', $iri, ['json' => [
-            'title' => 'updated title',
-        ]]);
-
-        self::assertResponseIsSuccessful();
-        self::assertJsonContains([
-            '@id' => $iri,
-            'isbn' => self::ISBN,
-            'title' => 'updated title',
-        ]);
-    }
-
-    public function testDeleteBook(): void
-    {
-        $token = $this->login();
-        $client = static::createClient();
-        $iri = (string) $this->findIriBy(Book::class, ['isbn' => self::ISBN]);
-        $client->request('DELETE', $iri, ['auth_bearer' => $token]);
-
-        self::assertResponseStatusCodeSame(Response::HTTP_NO_CONTENT);
-        self::assertNull(
-            // Through the container, you can access all your services from the tests, including the ORM, the mailer, remote API clients...
-            static::getContainer()->get('doctrine')->getRepository(Book::class)->findOneBy(['isbn' => self::ISBN])
-        );
-    }
-
-    public function testGenerateCover(): void
-    {
-        $book = static::getContainer()->get('doctrine')->getRepository(Book::class)->findOneBy(['isbn' => self::ISBN]);
-        self::assertInstanceOf(Book::class, $book);
-        if (!$book instanceof Book) {
-            throw new \LogicException('Book not found.');
-        }
-        $this->client->request('PUT', $this->router->generate('api_books_generate_cover_item', ['id' => $book->getId()]), [
-            'json' => [],
-        ]);
-
-        $messengerReceiverLocator = static::getContainer()->get('messenger.receiver_locator');
-        if (!$messengerReceiverLocator instanceof ServiceProviderInterface) {
-            throw new \RuntimeException('messenger.receiver_locator service not found.');
+        ];
+        if (null === $json) {
+            unset($options['json']);
         }
 
-        self::assertResponseIsSuccessful();
-        self::assertEquals(
-            1,
-            $messengerReceiverLocator->get('doctrine')->getMessageCount(),
-            'No message has been sent.'
+        if ('PATCH' === $method) {
+            $options['headers'] = [
+                'Content-Type: application/merge-patch+json',
+                'Accept: application/vnd.api+json',
+            ];
+        }
+
+        return $this->client->request(
+            $method,
+            $path,
+            $options,
         );
     }
 
     /**
-     * The filter is not applied by default on the Book collections.
+     * Get a book with reviews.
      */
-    public function testArchivedFilterDefault(): void
+    private function getBook(): Book
     {
-        $this->client->request('GET', '/books');
-        self::assertResponseIsSuccessful();
-        self::assertJsonContains([
-            '@id' => '/books',
-            '@type' => 'hydra:Collection',
-            'hydra:totalItems' => self::COUNT,
-        ]);
+        /** @var EntityManagerInterface $em */
+        $em = $this->client->getContainer()->get('doctrine')->getManager();
+        $qb = $em->getRepository(Book::class)->createQueryBuilder('b');
+        $qb->innerJoin('b.reviews', 'r');
+        $qb->setMaxResults(1);
+
+        /** @var Book $book */
+        $book = $qb->getQuery()->getSingleResult();
+
+        return $book;
     }
 
-    public function archivedParameterProvider(): \iterator
+    private function getExpectedAttributes(Book $book): array
     {
-        // Only archived are returned
-        yield ['true',  self::COUNT_ARCHIVED];
-        yield ['1', self::COUNT_ARCHIVED];
+        $expectedAttributes = [
+            'id' => '/books/'.$book->getUuid(),
+            'type' => 'Book',
+            'attributes' => [
+                'id' => $book->getUuid(),
+                'isbn' => $book->isbn,
+                'title' => $book->title,
+                'description' => $book->description,
+                'author' => $book->author,
+                'publicationDate' => $book->publicationDate?->format('Y-m-d'),
+                'reviews' => [],
+            ],
+        ];
 
-        // Incorrect value, no filter applied
-        yield ['',  self::COUNT];
-        yield ['true[]',  self::COUNT];
-        yield ['foobar',  self::COUNT];
+        foreach ($book->getReviews() as $review) {
+            $expectedAttributes['attributes']['reviews'][] = [
+                'data' => [
+                    'id' => '/reviews/'.$review->getId(),
+                    'type' => 'Review',
+                    'attributes' => [
+                        'id' => (string) $review->getId(),
+                        'body' => $review->body,
+                    ],
+                ],
+            ];
+        }
 
-        // archived items are excluded
-        yield ['false',  self::COUNT_WITHOUT_ARCHIVED];
-        yield ['0',  self::COUNT_WITHOUT_ARCHIVED];
-    }
-
-    /**
-     * @dataProvider archivedParameterProvider
-     */
-    public function testArchivedFilterParameter(string $archivedValue, int $count): void
-    {
-        $this->client->request('GET', '/books?archived='.$archivedValue);
-        self::assertResponseIsSuccessful();
-        self::assertJsonContains([
-            '@id' => '/books',
-            '@type' => 'hydra:Collection',
-            'hydra:totalItems' => $count,
-        ]);
-    }
-
-    private function login(): string
-    {
-        $response = static::createClient()->request('POST', '/authentication_token', ['json' => [
-            'email' => 'admin@example.com',
-            'password' => 'admin',
-        ]]);
-
-        return $response->toArray()['token'];
+        return $expectedAttributes;
     }
 }

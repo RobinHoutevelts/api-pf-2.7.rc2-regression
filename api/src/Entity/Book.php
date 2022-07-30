@@ -7,41 +7,28 @@ namespace App\Entity;
 use ApiPlatform\Core\Annotation\ApiFilter;
 use ApiPlatform\Core\Annotation\ApiProperty;
 use ApiPlatform\Core\Annotation\ApiResource;
-use ApiPlatform\Core\Annotation\ApiSubresource;
 use ApiPlatform\Core\Bridge\Doctrine\Orm\Filter\OrderFilter;
-use ApiPlatform\Core\Bridge\Doctrine\Orm\Filter\SearchFilter;
 use ApiPlatform\Core\Serializer\Filter\PropertyFilter;
+use App\Dto;
 use App\Filter\ArchivedFilter;
 use Doctrine\Common\Collections\ArrayCollection;
 use Doctrine\Common\Collections\Collection;
 use Doctrine\ORM\Mapping as ORM;
-use Ramsey\Uuid\Doctrine\UuidGenerator;
+use Ramsey\Uuid\Uuid;
 use Ramsey\Uuid\UuidInterface;
 use Symfony\Component\Serializer\Annotation\Groups;
-use Symfony\Component\Validator\Constraints as Assert;
 
 /**
  * @see https://schema.org/Book Documentation on Schema.org
  */
 #[ORM\Entity]
 #[ApiResource(
-    iri: 'https://schema.org/Book',
-    itemOperations: [
-        'get',
-        'put',
-        'patch',
-        'delete' => ['security' => 'is_granted("ROLE_ADMIN")'],
-        'generate_cover' => [
-            'method' => 'PUT',
-            'path' => '/books/{id}/generate-cover',
-            'output' => false,
-            'messenger' => true,
-            'normalizationContext' => ['groups' => ['book:read', 'book:cover']],
-        ],
-    ],
-    mercure: true,
+    input: Dto\Book::class,
+    output: Dto\Book::class,
     normalizationContext: ['groups' => ['book:read']],
-    paginationClientItemsPerPage: true,
+    denormalizationContext: ['groups' => ['book:write']],
+    collectionOperations: ['post'],
+    itemOperations: ['get']
 )]
 #[ApiFilter(ArchivedFilter::class)]
 #[ApiFilter(OrderFilter::class, properties: ['id', 'title', 'author', 'isbn', 'publicationDate'])]
@@ -50,66 +37,50 @@ class Book implements ArchivableInterface
 {
     use ArchivableTrait;
 
-    #[ORM\Id, ORM\GeneratedValue(strategy: 'CUSTOM'), ORM\CustomIdGenerator(class: UuidGenerator::class)]
-    #[ORM\Column(type: 'uuid', unique: true)]
-    #[Groups(groups: ['book:read'])]
-    private ?UuidInterface $id = null;
+    #[ORM\Id]
+    #[ORM\GeneratedValue]
+    #[ORM\Column(type: 'integer')]
+    #[ApiProperty(identifier: false)]
+    private ?int $id = null;
+
+    #[ORM\Column(type: 'uuid')]
+    #[ApiProperty(identifier: true)]
+    private UuidInterface $uuid;
 
     /**
      * The ISBN of the book.
      */
     #[ORM\Column(nullable: true)]
-    #[ApiProperty(iri: 'https://schema.org/isbn')]
-    #[Assert\Isbn]
-    #[Groups(groups: ['book:read'])]
     public ?string $isbn = null;
 
     /**
      * The title of the book.
      */
     #[ORM\Column]
-    #[ApiFilter(SearchFilter::class, strategy: 'ipartial')]
-    #[ApiProperty(iri: 'https://schema.org/name')]
-    #[Assert\NotBlank]
-    #[Groups(groups: ['book:read', 'review:read'])]
     public ?string $title = null;
 
     /**
      * A description of the item.
      */
     #[ORM\Column(type: 'text')]
-    #[ApiProperty(iri: 'https://schema.org/description')]
-    #[Assert\NotBlank]
-    #[Groups(groups: ['book:read'])]
     public ?string $description = null;
 
     /**
      * The author of this content or rating. Please note that author is special in that HTML 5 provides a special mechanism for indicating authorship via the rel tag. That is equivalent to this and may be used interchangeably.
      */
     #[ORM\Column]
-    #[ApiFilter(SearchFilter::class, strategy: 'ipartial')]
-    #[ApiProperty(iri: 'https://schema.org/author')]
-    #[Assert\NotBlank]
-    #[Groups(groups: ['book:read'])]
     public ?string $author = null;
 
     /**
      * The date on which the CreativeWork was created or the item was added to a DataFeed.
      */
     #[ORM\Column(type: 'date')]
-    #[ApiProperty(iri: 'https://schema.org/dateCreated')]
-    #[Assert\NotNull]
-    #[Assert\Type(\DateTimeInterface::class)]
-    #[Groups(groups: ['book:read'])]
     public ?\DateTimeInterface $publicationDate = null;
 
     /**
      * The book's reviews.
      */
     #[ORM\OneToMany(mappedBy: 'book', targetEntity: Review::class, cascade: ['persist', 'remove'], orphanRemoval: true)]
-    #[ApiProperty(iri: 'https://schema.org/reviews')]
-    #[ApiSubresource]
-    #[Groups(groups: ['book:read'])]
     private Collection $reviews;
 
     /**
@@ -118,14 +89,20 @@ class Book implements ArchivableInterface
     #[Groups(groups: ['book:cover'])]
     public ?string $cover = null;
 
-    public function __construct()
+    public function __construct(?UuidInterface $uuid = null)
     {
+        $this->uuid = $uuid ?: Uuid::uuid4();
         $this->reviews = new ArrayCollection();
     }
 
-    public function getId(): ?UuidInterface
+    public function getId(): ?int
     {
         return $this->id;
+    }
+
+    public function getUuid(): string
+    {
+        return (string) $this->uuid;
     }
 
     public function addReview(Review $review, bool $updateRelation = true): void
